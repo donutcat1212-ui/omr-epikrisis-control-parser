@@ -305,6 +305,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         dest="no_pause",
         help="Ждать Enter в конце вместо автоматического закрытия консоли.",
     )
+    parser.add_argument(
+        "--keep-exe",
+        action="store_true",
+        help="Не удалять exe после успешного завершения.",
+    )
     parser.add_argument("--early-window", type=int, default=60)
     parser.add_argument("--early-error-rate", type=float, default=0.20)
     parser.add_argument("--early-min-errors", type=int, default=10)
@@ -1198,6 +1203,31 @@ def publish(paths: RunPaths) -> None:
     paths.output_staging.rename(paths.output_final)
 
 
+def schedule_self_delete(args: argparse.Namespace, logger: Logger | None) -> None:
+    if args.dry_run or args.keep_exe:
+        return
+    if not getattr(sys, "frozen", False):
+        return
+    if platform.system().lower() != "windows":
+        return
+    exe_path = Path(sys.executable).resolve()
+    command = f'ping 127.0.0.1 -n 6 > nul & del /f /q "{exe_path}"'
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:  # pragma: no cover - Windows only
+        subprocess.Popen(
+            ["cmd", "/c", command],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+        if logger:
+            logger.write(f"Self-delete scheduled for exe: {exe_path}")
+    except Exception as exc:
+        if logger:
+            logger.write(f"Self-delete scheduling failed: {type(exc).__name__}: {exc}")
+
+
 def fail_staging(paths: RunPaths, keep_failed: bool) -> None:
     if not paths.output_staging.exists():
         return
@@ -1228,6 +1258,7 @@ def run(argv: list[str]) -> int:
     logger: Logger | None = None
     extractor: TextExtractor | None = None
     sleep_blocker = SleepBlocker()
+    success = False
     try:
         preflight(args, paths)
         create_staging(paths)
@@ -1252,6 +1283,7 @@ def run(argv: list[str]) -> int:
         write_summary(records, paths.logs_dir, paths.sources, paths.output_final, args.dry_run)
         publish(paths)
         print(f"ГОТОВО. Логи: {paths.output_final / 'logs'}")
+        success = True
         return 0
     except FatalRunError as exc:
         message = f"FAILED: {exc}"
@@ -1283,6 +1315,8 @@ def run(argv: list[str]) -> int:
                 input("Нажмите Enter для выхода...")
             except EOFError:
                 pass
+        if success:
+            schedule_self_delete(args, logger)
 
 
 def main() -> None:
