@@ -505,7 +505,7 @@ def detect_evidence(beginning_text: str, source_path: Path) -> MatchEvidence:
     normalized = normalize_text(beginning_text)
     path_normalized = normalize_text(str(source_path))
     evidence = MatchEvidence()
-    evidence.title = bool(re.search(r"\bвыписн\w*\s+эпикриз\b", normalized))
+    evidence.title = has_discharge_title(beginning_text)
     clinic_terms = (
         "федеральный центр мозга",
         "фцмн",
@@ -523,6 +523,20 @@ def detect_evidence(beginning_text: str, source_path: Path) -> MatchEvidence:
     }
     evidence.weak_markers = [name for name, matched in weak_checks.items() if matched]
     return evidence
+
+
+def has_discharge_title(text: str) -> bool:
+    head = text.replace("\u00a0", " ")[:5000]
+    for line in head.splitlines():
+        normalized_line = normalize_text(line).strip(" .,:;№-")
+        if normalized_line == "выписной эпикриз":
+            return True
+    return bool(
+        re.search(
+            r"(?im)(?:^|[\r\n\f])\s*выписн\w*\s+эпикриз\s*(?:$|[\r\n\f])",
+            head,
+        )
+    )
 
 
 def is_omr1_department(normalized: str) -> bool:

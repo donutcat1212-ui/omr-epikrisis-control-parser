@@ -47,6 +47,20 @@ class EpikrisisFinderTests(unittest.TestCase):
         self.assertFalse(evidence.department_omr1)
         self.assertNotEqual(classify(evidence), STATUS_CONFIRMED)
 
+    def test_incidental_discharge_phrase_is_not_title(self):
+        text = """
+        Отделение медицинской реабилитации пациентов с нарушением функций центральной нервной системы №1
+        ПЕРВИЧНЫЙ ОСМОТР
+        Фамилия, имя, отчество (при наличии) Баталов Владимир Юрьевич
+        Медицинская карта пациента, получающего медицинскую помощь в стационарных условиях № СКП5822/25
+        Анамнез заболевания: выписной эпикриз не предоставлен.
+        """
+        evidence = detect_evidence(text, Path("Первичный осмотр.doc"))
+
+        self.assertFalse(evidence.title)
+        self.assertTrue(evidence.department_omr1)
+        self.assertNotEqual(classify(evidence), STATUS_CONFIRMED)
+
     def test_older_cns_abbreviation_header_match(self):
         text = """
         ФГБУ «ФЦМН» ФМБА РОССИИ
