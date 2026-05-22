@@ -305,17 +305,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         dest="no_pause",
         help="Ждать Enter в конце вместо автоматического закрытия консоли.",
     )
-    parser.add_argument(
-        "--no-shutdown",
-        action="store_true",
-        help="Не выключать Windows после успешного завершения.",
-    )
-    parser.add_argument(
-        "--shutdown-delay",
-        type=int,
-        default=300,
-        help="Задержка выключения Windows после успешного завершения, секунд. По умолчанию 300.",
-    )
     parser.add_argument("--early-window", type=int, default=60)
     parser.add_argument("--early-error-rate", type=float, default=0.20)
     parser.add_argument("--early-min-errors", type=int, default=10)
@@ -1195,33 +1184,6 @@ def publish(paths: RunPaths) -> None:
     paths.output_staging.rename(paths.output_final)
 
 
-def schedule_shutdown(args: argparse.Namespace, logger: Logger | None) -> None:
-    if args.dry_run or args.no_shutdown:
-        return
-    if platform.system().lower() != "windows":
-        if logger:
-            logger.write("Shutdown skipped: not Windows.")
-        return
-    delay = max(0, int(args.shutdown_delay))
-    command = [
-        "shutdown",
-        "/s",
-        "/t",
-        str(delay),
-        "/c",
-        "OMR epikrisis control parser finished successfully.",
-    ]
-    try:  # pragma: no cover - Windows only
-        subprocess.run(command, check=False)
-        if logger:
-            logger.write(
-                f"Windows shutdown scheduled in {delay} seconds. To cancel: shutdown /a"
-            )
-    except Exception as exc:
-        if logger:
-            logger.write(f"Shutdown scheduling failed: {type(exc).__name__}: {exc}")
-
-
 def fail_staging(paths: RunPaths, keep_failed: bool) -> None:
     if not paths.output_staging.exists():
         return
@@ -1276,7 +1238,6 @@ def run(argv: list[str]) -> int:
         write_summary(records, paths.logs_dir, paths.sources, paths.output_final, args.dry_run)
         publish(paths)
         print(f"ГОТОВО. Логи: {paths.output_final / 'logs'}")
-        schedule_shutdown(args, logger)
         return 0
     except FatalRunError as exc:
         message = f"FAILED: {exc}"

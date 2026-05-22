@@ -75,7 +75,6 @@ class EpikrisisFinderTests(unittest.TestCase):
 
         self.assertEqual([path.name for path in paths.sources], ["ОМР 1 2025", "ОМР1 2024", "ОМР1 2023"])
         self.assertTrue(args.no_pause)
-        self.assertFalse(args.no_shutdown)
 
     def test_same_patient_different_dates_are_not_ambiguous_duplicates(self):
         first = self._record("a.docx", "1", "2025-01-10")
