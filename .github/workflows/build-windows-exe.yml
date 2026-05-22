@@ -1,0 +1,50 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m unittest discover -s tests
+
+      - name: Build exe
+        run: pyinstaller --onefile --clean --name epikrisis_control_2023_2025 src\epikrisis_finder.py
+
+      - name: Upload Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: epikrisis_control_2023_2025-windows-exe
+          path: dist\epikrisis_control_2023_2025.exe
+
+      - name: Publish latest release
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --cleanup-tag --yes 2>$null
+          gh release create latest dist\epikrisis_control_2023_2025.exe `
+            --title "Latest Windows EXE" `
+            --notes "Windows executable built automatically from commit $env:GITHUB_SHA."
