@@ -34,6 +34,7 @@ from xml.sax.saxutils import escape
 SOURCE_FOLDER_NAMES = ("ОМР 1 2025", "ОМР1 2024", "ОМР1 2023")
 TARGET_FOLDERS = ("ВМП", "ДМС", "ОМС", "ПМУ")
 WORD_EXTENSIONS = {".doc", ".docx", ".rtf"}
+ALLOWED_CREATION_YEARS = {2023, 2024, 2025}
 REVIEW_DIRS = (
     "likely_discharge",
     "weak_match",
@@ -62,6 +63,8 @@ MANIFEST_FIELDS = [
     "source_folder",
     "original_name",
     "extension",
+    "created_time",
+    "created_year",
     "size_bytes",
     "mtime",
     "sha256",
@@ -134,6 +137,8 @@ class DocumentRecord:
     source_folder: str
     extension: str
     original_name: str
+    created_time: str = ""
+    created_year: str = ""
     size_bytes: int = 0
     mtime: str = ""
     status: str = STATUS_NON_MATCH
@@ -164,6 +169,8 @@ class DocumentRecord:
             "source_folder": self.source_folder,
             "original_name": self.original_name,
             "extension": self.extension,
+            "created_time": self.created_time,
+            "created_year": self.created_year,
             "size_bytes": self.size_bytes,
             "mtime": self.mtime,
             "sha256": self.sha256,
@@ -310,6 +317,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Не удалять exe после успешного завершения.",
     )
+    parser.add_argument(
+        "--ignore-creation-year",
+        action="store_true",
+        help="Не фильтровать файлы по году создания. По умолчанию берутся только 2023-2025.",
+    )
     parser.add_argument("--early-window", type=int, default=60)
     parser.add_argument("--early-error-rate", type=float, default=0.20)
     parser.add_argument("--early-min-errors", type=int, default=10)
@@ -435,12 +447,18 @@ def create_staging(paths: RunPaths) -> None:
     paths.temp_dir.mkdir(parents=True)
 
 
-def discover_word_files(sources: tuple[Path, ...], logger: Logger) -> list[Path]:
+def discover_word_files(
+    sources: tuple[Path, ...],
+    logger: Logger,
+    ignore_creation_year: bool = False,
+) -> list[Path]:
     files: list[Path] = []
+    skipped_by_year: dict[int, int] = {}
     for source in sources:
         logger.write(f"Scanning source: {source.name}")
         for folder_name in TARGET_FOLDERS:
             before = len(files)
+            skipped_before = sum(skipped_by_year.values())
             logger.write(f"Scanning folder: {source.name}/{folder_name}")
             root = source / folder_name
             for current_root, dir_names, file_names in os.walk(root):
@@ -449,12 +467,24 @@ def discover_word_files(sources: tuple[Path, ...], logger: Logger) -> list[Path]
                     if file_name.startswith("~$"):
                         continue
                     path = Path(current_root) / file_name
-                    if path.suffix.lower() in WORD_EXTENSIONS:
-                        files.append(path)
+                    if path.suffix.lower() not in WORD_EXTENSIONS:
+                        continue
+                    if not ignore_creation_year:
+                        created_year = file_created_year(path)
+                        if created_year not in ALLOWED_CREATION_YEARS:
+                            skipped_by_year[created_year] = skipped_by_year.get(created_year, 0) + 1
+                            continue
+                    files.append(path)
             logger.write(
                 f"Scanning folder done: {source.name}/{folder_name}, "
-                f"Word/RTF found: {len(files) - before}"
+                f"Word/RTF accepted: {len(files) - before}, "
+                f"skipped by creation year: {sum(skipped_by_year.values()) - skipped_before}"
             )
+    if skipped_by_year:
+        details = ", ".join(
+            f"{year}: {count}" for year, count in sorted(skipped_by_year.items())
+        )
+        logger.write(f"Skipped Word/RTF by creation year outside 2023-2025: {details}")
     return sorted(files, key=lambda item: str(item).casefold())
 
 
@@ -480,15 +510,27 @@ def source_folder_for(path: Path, source: Path | None) -> str:
 def stat_record(path: Path, sources: tuple[Path, ...]) -> DocumentRecord:
     stat = path.stat()
     source = source_root_for(path, sources)
+    created_timestamp = creation_timestamp(stat)
+    created_dt = dt.datetime.fromtimestamp(created_timestamp)
     return DocumentRecord(
         source_path=path,
         source_root=source.name if source else "",
         source_folder=source_folder_for(path, source),
         extension=path.suffix.lower(),
         original_name=path.name,
+        created_time=created_dt.isoformat(timespec="seconds"),
+        created_year=str(created_dt.year),
         size_bytes=stat.st_size,
         mtime=dt.datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
     )
+
+
+def creation_timestamp(stat_result: os.stat_result) -> float:
+    return getattr(stat_result, "st_birthtime", stat_result.st_ctime)
+
+
+def file_created_year(path: Path) -> int:
+    return dt.datetime.fromtimestamp(creation_timestamp(path.stat())).year
 
 
 def normalize_text(text: str) -> str:
@@ -1271,7 +1313,11 @@ def run(argv: list[str]) -> int:
         logger.write(f"Staging output: {paths.output_staging}")
         logger.write(f"Dry-run: {args.dry_run}")
 
-        files = discover_word_files(paths.sources, logger)
+        files = discover_word_files(
+            paths.sources,
+            logger,
+            ignore_creation_year=args.ignore_creation_year,
+        )
         if not files:
             raise FatalRunError("В целевых папках не найдено ни одного Word/RTF файла.")
         logger.write(f"Discovered Word/RTF files: {len(files)}")
