@@ -78,6 +78,7 @@ MANIFEST_FIELDS = [
     "match_title",
     "match_clinic_header",
     "match_department_omr1",
+    "match_non_discharge_hint",
     "match_reasons",
     "error_type",
     "error_message",
@@ -116,6 +117,7 @@ class MatchEvidence:
     title: bool = False
     clinic_header: bool = False
     department_omr1: bool = False
+    non_discharge_hint: bool = False
     weak_markers: list[str] = field(default_factory=list)
 
     def reasons(self) -> str:
@@ -126,6 +128,8 @@ class MatchEvidence:
             reasons.append("clinic_header")
         if self.department_omr1:
             reasons.append("department_omr1")
+        if self.non_discharge_hint:
+            reasons.append("non_discharge_hint")
         reasons.extend(self.weak_markers)
         return ";".join(reasons)
 
@@ -155,6 +159,7 @@ class DocumentRecord:
     match_title: bool = False
     match_clinic_header: bool = False
     match_department_omr1: bool = False
+    match_non_discharge_hint: bool = False
     match_reasons: str = ""
     error_type: str = ""
     error_message: str = ""
@@ -184,6 +189,7 @@ class DocumentRecord:
             "match_title": self.match_title,
             "match_clinic_header": self.match_clinic_header,
             "match_department_omr1": self.match_department_omr1,
+            "match_non_discharge_hint": self.match_non_discharge_hint,
             "match_reasons": self.match_reasons,
             "error_type": self.error_type,
             "error_message": self.error_message,
@@ -561,6 +567,7 @@ def detect_evidence(beginning_text: str, source_path: Path) -> MatchEvidence:
     )
     evidence.clinic_header = any(term in normalized for term in clinic_terms)
     evidence.department_omr1 = is_omr1_department(normalized)
+    evidence.non_discharge_hint = has_non_discharge_hint(beginning_text, source_path)
 
     weak_checks = {
         "path_discharge_hint": any(token in path_normalized for token in ("выпис", "эпикриз")),
@@ -586,24 +593,67 @@ def has_discharge_title(text: str) -> bool:
     )
 
 
+def has_non_discharge_hint(text: str, source_path: Path) -> bool:
+    name = normalize_text(source_path.name)
+    name = re.sub(r"[_./\\()\\[\\]{}]+", " ", name)
+    name = re.sub(r"[-–—]+", " ", name)
+    head_lines = [normalize_text(line).strip(" .,:;№-") for line in text[:5000].splitlines()]
+
+    name_patterns = (
+        r"\bэ\s*э\b",
+        r"\bэтап\w*\b",
+        r"\bпереводн\w*\b",
+        r"\bпосмертн\w*\b",
+        r"\bвыписн\w*\s+осмотр\b",
+        r"\bпервичн\w*\b",
+        r"\bосмотр\b",
+        r"\bлист\s+назнач",
+        r"\bдневник\w*\b",
+        r"\bфизио\s*карт",
+        r"\bперевоз",
+        r"\bпаллиатив",
+    )
+    if any(re.search(pattern, name) for pattern in name_patterns):
+        return True
+
+    heading_patterns = (
+        r"^этапн\w*\s+эпикриз$",
+        r"^этап\s+эпикриз",
+        r"^переводн\w*\s+эпикриз$",
+        r"^посмертн\w*\s+эпикриз$",
+        r"^первичн\w*\s+осмотр",
+        r"^выписн\w*\s+осмотр",
+        r"^консультац",
+    )
+    return any(
+        any(re.search(pattern, line) for pattern in heading_patterns)
+        for line in head_lines[:20]
+    )
+
+
 def is_omr1_department(normalized: str) -> bool:
     if "отделение медицинской реабилитации" not in normalized:
         return False
     cns_match = re.search(
-        r"нарушением\s+функци(?:и|й)\s+(?:цнс|центральной\s+нервной\s+системы)",
+        r"нарушени(?:ем|ями)\s+функци(?:и|й)\s+(?:цнс|центральной\s+нервной\s+системы)",
         normalized,
     )
     if not cns_match:
         return False
-    omr_index = normalized.find("отделение медицинской реабилитации")
-    cns_index = cns_match.start()
-    start = min(index for index in (omr_index, cns_index) if index >= 0)
-    window = normalized[start : start + 500]
-    return bool(re.search(r"(?:№|n|no\.?|номер)?\s*1\b", window))
+    tail = normalized[cns_match.end() : cns_match.end() + 120]
+    tail = re.split(r"\b(?:номер\s+медицинской\s+карты|сведения\s+о\s+пациенте|поступил)\b", tail)[0]
+    return bool(re.search(r"(?:№|n|no\.?|номер)?\s*1\b", tail))
 
 
 def classify(evidence: MatchEvidence) -> str:
     if evidence.title and evidence.clinic_header and evidence.department_omr1:
+        return STATUS_CONFIRMED
+    if (
+        evidence.clinic_header
+        and evidence.department_omr1
+        and not evidence.non_discharge_hint
+        and has_strong_discharge_structure(evidence)
+    ):
         return STATUS_CONFIRMED
     if evidence.title and (evidence.clinic_header or evidence.department_omr1):
         return STATUS_LIKELY
@@ -612,6 +662,11 @@ def classify(evidence: MatchEvidence) -> str:
     if evidence.title or len(evidence.weak_markers) >= 2:
         return STATUS_WEAK
     return STATUS_NON_MATCH
+
+
+def has_strong_discharge_structure(evidence: MatchEvidence) -> bool:
+    required = {"medical_card", "hospital_period", "patient_info"}
+    return required.issubset(set(evidence.weak_markers))
 
 
 def extract_discovery_metadata(text: str) -> dict[str, str]:
@@ -914,6 +969,7 @@ def process_records(
             record.match_title = evidence.title
             record.match_clinic_header = evidence.clinic_header
             record.match_department_omr1 = evidence.department_omr1
+            record.match_non_discharge_hint = evidence.non_discharge_hint
             record.match_reasons = evidence.reasons()
             metadata = extract_discovery_metadata(text)
             record.medical_card = metadata.get("medical_card", "")
@@ -1069,20 +1125,119 @@ def mark_exact_duplicates(records: list[DocumentRecord]) -> None:
 
 
 def mark_ambiguous_duplicates(records: list[DocumentRecord]) -> None:
+    mark_groups_as_ambiguous_duplicates(records, episode_key_for_duplicate)
+    mark_medical_card_duplicates(records)
+
+
+def mark_groups_as_ambiguous_duplicates(
+    records: list[DocumentRecord],
+    key_builder,
+) -> None:
     groups: dict[str, list[DocumentRecord]] = {}
     for record in records:
         if record.status in {STATUS_EXACT_DUPLICATE, STATUS_READ_ERROR}:
             continue
-        if not record.episode_key:
+        key = key_builder(record)
+        if not key:
             continue
-        groups.setdefault(record.episode_key, []).append(record)
+        groups.setdefault(key, []).append(record)
 
     for group_records in groups.values():
         hashes = {record.sha256 for record in group_records if record.sha256}
         if len(hashes) <= 1:
             continue
+        primary = canonical_episode_record(group_records)
         for record in group_records:
+            if record is primary:
+                continue
             record.status = STATUS_AMBIGUOUS_DUPLICATE
+            if primary:
+                record.duplicate_of = primary.source_path.as_posix()
+
+
+def episode_key_for_duplicate(record: DocumentRecord) -> str:
+    return record.episode_key
+
+
+def medical_card_key_for_duplicate(record: DocumentRecord) -> str:
+    return normalize_key(record.medical_card) if record.medical_card else ""
+
+
+def mark_medical_card_duplicates(records: list[DocumentRecord]) -> None:
+    groups: dict[str, list[DocumentRecord]] = {}
+    for record in records:
+        if record.status in {STATUS_EXACT_DUPLICATE, STATUS_READ_ERROR}:
+            continue
+        key = medical_card_key_for_duplicate(record)
+        if not key:
+            continue
+        groups.setdefault(key, []).append(record)
+
+    for group_records in groups.values():
+        hashes = {record.sha256 for record in group_records if record.sha256}
+        if len(hashes) <= 1:
+            continue
+        known_patients = {
+            patient_identity_key(record)
+            for record in group_records
+            if patient_identity_key(record)
+        }
+        if len(known_patients) != 1:
+            continue
+        primary = canonical_episode_record(group_records)
+        for record in group_records:
+            if record is primary:
+                continue
+            record.status = STATUS_AMBIGUOUS_DUPLICATE
+            if primary:
+                record.duplicate_of = primary.source_path.as_posix()
+
+
+def patient_identity_key(record: DocumentRecord) -> str:
+    normalized_fio = normalize_key(record.patient_fio)
+    if not normalized_fio:
+        return ""
+    return normalized_fio + "|" + record.birth_date if record.birth_date else normalized_fio
+
+
+def canonical_episode_record(records: list[DocumentRecord]) -> DocumentRecord | None:
+    confirmed = [record for record in records if record.status == STATUS_CONFIRMED]
+    if not confirmed:
+        return None
+    return min(confirmed, key=canonical_episode_sort_key)
+
+
+def canonical_episode_sort_key(record: DocumentRecord) -> tuple[int, int, int, int, str]:
+    reasons = set(record.match_reasons.split(";")) if record.match_reasons else set()
+    complete_header = (
+        record.match_title
+        and record.match_clinic_header
+        and record.match_department_omr1
+    )
+    strong_structure = {"medical_card", "hospital_period", "patient_info"}.issubset(reasons)
+    missing_metadata = sum(
+        1
+        for value in (
+            record.medical_card,
+            record.patient_fio,
+            record.birth_date,
+            record.admission_date,
+            record.discharge_date,
+        )
+        if not value
+    )
+    date_rank = date_sort_value(record.discharge_date or record.admission_date)
+    quality_rank = 0 if complete_header and strong_structure else 1 if complete_header else 2
+    non_discharge_penalty = 1 if record.match_non_discharge_hint else 0
+    return quality_rank, non_discharge_penalty, -date_rank, missing_metadata, str(record.source_path).casefold()
+
+
+def date_sort_value(value: str) -> int:
+    try:
+        parsed = dt.datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return 0
+    return int(parsed.strftime("%Y%m%d"))
 
 
 def target_dir_for(record: DocumentRecord, paths: RunPaths) -> Path:
@@ -1245,6 +1400,14 @@ def publish(paths: RunPaths) -> None:
     paths.output_staging.rename(paths.output_final)
 
 
+def cleanup_temp_dir(paths: RunPaths, logger: Logger | None) -> None:
+    if not paths.temp_dir.exists():
+        return
+    shutil.rmtree(paths.temp_dir, ignore_errors=True)
+    if paths.temp_dir.exists() and logger:
+        logger.write(f"WARNING: temp dir was not removed before publish: {paths.temp_dir}")
+
+
 def schedule_self_delete(args: argparse.Namespace, logger: Logger | None) -> None:
     if args.dry_run or args.keep_exe:
         return
@@ -1324,9 +1487,12 @@ def run(argv: list[str]) -> int:
 
         extractor = TextExtractor(paths.temp_dir, logger)
         records = process_records(files, paths.sources, extractor, thresholds, logger)
+        extractor.close()
+        extractor = None
         copy_outputs(records, paths, args.dry_run, logger)
         write_manifest(records, paths.logs_dir)
         write_summary(records, paths.logs_dir, paths.sources, paths.output_final, args.dry_run)
+        cleanup_temp_dir(paths, logger)
         publish(paths)
         print(f"ГОТОВО. Логи: {paths.output_final / 'logs'}")
         success = True

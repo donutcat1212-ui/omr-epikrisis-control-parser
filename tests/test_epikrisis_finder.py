@@ -8,6 +8,7 @@ from epikrisis_finder import (  # noqa: E402
     STATUS_AMBIGUOUS_DUPLICATE,
     STATUS_CONFIRMED,
     STATUS_EXACT_DUPLICATE,
+    STATUS_LIKELY,
     DocumentRecord,
     build_episode_key,
     build_run_paths,
@@ -47,6 +48,19 @@ class EpikrisisFinderTests(unittest.TestCase):
         self.assertFalse(evidence.department_omr1)
         self.assertNotEqual(classify(evidence), STATUS_CONFIRMED)
 
+    def test_other_department_not_confirmed_when_later_text_has_one(self):
+        text = """
+        ФГБУ «ФЦМН» ФМБА РОССИИ
+        Выписной эпикриз
+        Отделение медицинской реабилитации для пациентов с нарушениями функции ЦНС №2
+        Номер медицинской карты № 2141/23
+        Поступил: в стационар - 1, в дневной стационар - 2
+        """
+        evidence = detect_evidence(text, Path("выписной ОМР2.doc"))
+
+        self.assertFalse(evidence.department_omr1)
+        self.assertNotEqual(classify(evidence), STATUS_CONFIRMED)
+
     def test_incidental_discharge_phrase_is_not_title(self):
         text = """
         Отделение медицинской реабилитации пациентов с нарушением функций центральной нервной системы №1
@@ -83,6 +97,103 @@ class EpikrisisFinderTests(unittest.TestCase):
         self.assertEqual(metadata["birth_date"], "1969-07-13")
         self.assertEqual(metadata["discharge_date"], "2023-05-26")
 
+    def test_strong_discharge_structure_can_confirm_without_title(self):
+        text = """
+        ФГБУ «ФЦМН» ФМБА РОССИИ
+        Отделение медицинской реабилитации пациентов с нарушением функции ЦНС №1
+        Номер медицинской карты СКП514/25
+        Сведения о пациенте:
+        Фамилия, имя, отчество (при наличии): Иванов Эдуард Михайлович
+        Дата рождения (возраст): 12.03.1970 (54 года)
+        Период нахождения в стационаре, дневном стационаре: с «25» января 2025 г.
+        по «11» февраля 2025 г.
+        """
+        evidence = detect_evidence(text, Path("Невролог_Выписной эпикриз_Иванов.doc"))
+
+        self.assertFalse(evidence.title)
+        self.assertTrue(evidence.department_omr1)
+        self.assertEqual(classify(evidence), STATUS_CONFIRMED)
+
+    def test_stage_epicrisis_is_not_confirmed_by_structure_fallback(self):
+        text = """
+        ФГБУ «ФЦМН» ФМБА РОССИИ
+        Отделение медицинской реабилитации пациентов с нарушением функции ЦНС №1
+        Номер медицинской карты СКП5627/25
+        Сведения о пациенте:
+        Фамилия, имя, отчество (при наличии): Иванов Иван Иванович
+        Дата рождения (возраст): 12.03.1970 (54 года)
+        Период нахождения в стационаре, дневном стационаре: с «25» января 2025 г.
+        по «11» февраля 2025 г.
+        """
+        evidence = detect_evidence(text, Path("Этапный эпикриз.doc"))
+
+        self.assertTrue(evidence.non_discharge_hint)
+        self.assertNotEqual(classify(evidence), STATUS_CONFIRMED)
+
+    def test_transfer_epicrisis_is_not_confirmed_by_structure_fallback(self):
+        text = """
+        ФГБУ «ФЦМН» ФМБА РОССИИ
+        Переводной эпикриз
+        Отделение медицинской реабилитации пациентов с нарушением функции ЦНС №1
+        Номер медицинской карты СКП8289/23
+        Сведения о пациенте:
+        Фамилия, имя, отчество (при наличии): Иванов Иван Иванович
+        Дата рождения (возраст): 12.03.1970 (54 года)
+        Период нахождения в стационаре, дневном стационаре: с «25» января 2025 г.
+        по «11» февраля 2025 г.
+        """
+        evidence = detect_evidence(text, Path("Переводной эпикриз.doc"))
+
+        self.assertFalse(evidence.title)
+        self.assertTrue(evidence.non_discharge_hint)
+        self.assertNotEqual(classify(evidence), STATUS_CONFIRMED)
+
+    def test_postmortem_epicrisis_is_not_confirmed_by_structure_fallback(self):
+        text = """
+        ФГБУ «ФЦМН» ФМБА РОССИИ
+        ПОСМЕРТНЫЙ ЭПИКРИЗ
+        Отделение медицинской реабилитации пациентов с нарушением функции ЦНС №1
+        Номер медицинской карты СКП2723/24
+        Сведения о пациенте:
+        Фамилия, имя, отчество (при наличии): Иванов Иван Иванович
+        Дата рождения (возраст): 12.03.1970 (54 года)
+        Период нахождения в стационаре, дневном стационаре: с «25» января 2025 г.
+        по «11» февраля 2025 г.
+        """
+        evidence = detect_evidence(text, Path("ПОСМЕРТНЫЙ ЭПИКРИЗ.docx"))
+
+        self.assertFalse(evidence.title)
+        self.assertTrue(evidence.non_discharge_hint)
+        self.assertNotEqual(classify(evidence), STATUS_CONFIRMED)
+
+    def test_real_title_overrides_non_discharge_filename_hint(self):
+        text = """
+        ФГБУ «ФЦМН» ФМБА РОССИИ
+        Выписной эпикриз
+        Отделение медицинской реабилитации пациентов с нарушением функции ЦНС №1
+        Номер медицинской карты СКП5627/25
+        """
+        evidence = detect_evidence(text, Path("Этапный как выписной.doc"))
+
+        self.assertTrue(evidence.title)
+        self.assertTrue(evidence.non_discharge_hint)
+        self.assertEqual(classify(evidence), STATUS_CONFIRMED)
+
+    def test_omr1_with_narusheniyami_header_match(self):
+        text = """
+        ФГБУ «ФЦМН» ФМБА РОССИИ
+        ВЫПИСНОЙ ЭПИКРИЗ
+        Отделение медицинской реабилитации для пациентов с нарушениями функции ЦНС №1
+        Номер медицинской карты №СКП4498/23
+        Сведения о пациенте
+        Период нахождения в стационаре, дневном стационаре:
+        с "11" июля 2023 г. по "28" июля 2023г.
+        """
+        evidence = detect_evidence(text, Path("Выписной эпикриз.doc"))
+
+        self.assertTrue(evidence.department_omr1)
+        self.assertEqual(classify(evidence), STATUS_CONFIRMED)
+
     def test_control_parser_uses_all_three_year_roots(self):
         args = parse_args(["--source", "/tmp/source-root", "--output", "/tmp/output"])
         paths = build_run_paths(args)
@@ -101,9 +212,45 @@ class EpikrisisFinderTests(unittest.TestCase):
         self.assertEqual(first.status, STATUS_CONFIRMED)
         self.assertEqual(second.status, STATUS_CONFIRMED)
 
-    def test_same_patient_same_date_different_hash_goes_to_review(self):
+    def test_same_medical_card_keeps_one_latest_confirmed(self):
+        first = self._record("a.docx", "1", "2025-01-10")
+        second = self._record("b.docx", "2", "2025-02-10")
+        first.medical_card = "СКП123/25"
+        second.medical_card = "СКП123/25"
+
+        mark_ambiguous_duplicates([first, second])
+
+        self.assertEqual(first.status, STATUS_AMBIGUOUS_DUPLICATE)
+        self.assertEqual(second.status, STATUS_CONFIRMED)
+
+    def test_same_medical_card_different_known_patients_are_not_collapsed(self):
+        first = self._record("a.docx", "1", "2025-01-10")
+        second = self._record("b.docx", "2", "2025-02-10")
+        first.medical_card = "СКП123/25"
+        second.medical_card = "СКП123/25"
+        second.patient_fio = "Петров Петр Петрович"
+        second.birth_date = "1965-01-01"
+        second.episode_key = build_episode_key(second)
+
+        mark_ambiguous_duplicates([first, second])
+
+        self.assertEqual(first.status, STATUS_CONFIRMED)
+        self.assertEqual(second.status, STATUS_CONFIRMED)
+
+    def test_same_patient_same_date_different_hash_keeps_one_confirmed(self):
         first = self._record("a.docx", "1", "2025-01-10")
         second = self._record("b.docx", "2", "2025-01-10")
+
+        mark_ambiguous_duplicates([first, second])
+
+        statuses = sorted([first.status, second.status])
+        self.assertEqual(statuses, sorted([STATUS_CONFIRMED, STATUS_AMBIGUOUS_DUPLICATE]))
+
+    def test_same_patient_same_date_without_confirmed_stays_review(self):
+        first = self._record("a.docx", "1", "2025-01-10")
+        second = self._record("b.docx", "2", "2025-01-10")
+        first.status = STATUS_LIKELY
+        second.status = STATUS_LIKELY
 
         mark_ambiguous_duplicates([first, second])
 
